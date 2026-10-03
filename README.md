@@ -2,17 +2,13 @@
 
 PySide6 기반의 차량용 SW(CANoe/CAN, Controller Log 등) 검증 및 AI Test Case 분석 지원 도구입니다.
 
-## 🌟 핵심 문제 해결 및 기술적 특징 (Key Engineering Highlights)
+## 🌟기술적 특징 (Key Engineering Highlights)
 
-### 1. In-Memory 즉시 테마 전환 (Zero-Restart Theme Switch)
-- **문제점**: 기존 프로세스 재실행(`subprocess`) 방식의 테마 전환 구조로 인해 사용자가 작업 중이던 입력 데이터와 분석 결과가 초기화되는 문제 발생.
-- **해결책**: 동적 메서드 패칭(Monkey Patching) 및 QSS Hot-Reload 기술을 적용하여 **프로세스 재시작 없이 입력값과 결과를 100% 보존한 상태에서 실시간 테마 전환** 구현.
-
-### 2. SQA 검증 스코어링 & UI 시각화
+### 1. SQA 검증 스코어링 & UI 시각화
 - AI 분석 결과(TOTAL SCORE) 점수 구간대별(80점 이상 / 50점 이상 / 미만) Dynamic QSS Property 적용으로 검증 상태의 직관적 시각화 지원.
 - 비동기 처리 및 토스트(Toast) 메시지 시스템 도입으로 검증 진행 상황 Feedback 개선.
 
-### 3. 모듈 독립성 및 경로 안정성 확보
+### 2. 모듈 독립성 및 경로 안정성 확보
 - `Path(__file__).resolve().parent` 기반의 상대/절대 경로 자동 해소 로직을 구축하여 CWD(현재 작업 디렉토리) 변경에 독립적인 런처 구현.
 
 ## 📁 프로젝트 구조 (Architecture)
