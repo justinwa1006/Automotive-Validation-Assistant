@@ -1412,17 +1412,37 @@ class TcEngineMixin:
     # 도메인 레지스트리 조회 헬퍼
     # --------------------------------------------------------------------------
     def get_domain_key(self) -> str:
-        profile = self.current_domain_profile() or {}
-        key = str(profile.get("key", "")).strip().lower()
-        if key in FEW_SHOTS:
-            return key
-        if profile.get("automotive_tools"):  # CANoe/DBC/BLF 도구를 쓰는 프로필은 자동차 도메인
-            return "automotive"
-        name = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(profile.get("name", "")))  # WebAPI -> Web API
-        for domain_key, pattern in _DOMAIN_NAME_PATTERNS:
-            if pattern.search(name):
-                return domain_key
-        return DEFAULT_DOMAIN_KEY
+            """
+            현재 UI 콤보박스 선택값 및 도메인 프로필을 기반으로 
+            레지스트리 키('automotive', 'web_api', 'mobile_app' 등)를 정확히 추출합니다.
+            """
+            profile = self.current_domain_profile() or {}
+            
+            # 1. 프로필에 'key'가 명시되어 있으면 최우선 사용
+            key = str(profile.get("key", "")).strip().lower()
+            if key in FEW_SHOTS:
+                return key
+                
+            # 2. UI 콤보박스(qa_domain 또는 mode)에서 선택된 텍스트 직접 확인
+            domain_text = ""
+            if hasattr(self, "qa_domain") and hasattr(self.qa_domain, "currentText"):
+                domain_text = self.qa_domain.currentText()
+            elif hasattr(self, "qa_domain_combo") and hasattr(self.qa_domain_combo, "currentText"):
+                domain_text = self.qa_domain_combo.currentText()
+            else:
+                domain_text = str(profile.get("name", ""))
+    
+            # 3. 텍스트 정규식 패턴 매칭
+            text_to_check = f"{profile.get('name', '')} {domain_text}"
+            for domain_key, pattern in _DOMAIN_NAME_PATTERNS:
+                if pattern.search(text_to_check):
+                    return domain_key
+                    
+            # 4. 자동차 전용 툴(CANoe/DBC/BLF)을 사용하는 프로필인 경우
+            if profile.get("automotive_tools"):
+                return "automotive"
+    
+            return DEFAULT_DOMAIN_KEY
 
     def get_domain_few_shot(self, kind: str) -> str:
         """kind: 'generation' | 'analysis'. 프로필 few_shot 이 있으면 우선, 없으면 레지스트리."""
