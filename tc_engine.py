@@ -1,6 +1,6 @@
 """
-tc_engine.py - Automotive Validation Assistant Prompt & Execution Engine
-Refactored to 100-Point Prompt Architecture (100% Backward Compatible)
+tc_engine.py - Automotive & General SW Validation Assistant Prompt & Execution Engine
+Refactored to 100-Point Prompt Architecture (Multi-Domain Dynamic Few-Shot & Light Mask Protected)
 """
 
 from __future__ import annotations
@@ -16,15 +16,15 @@ from PySide6.QtGui import QTextCursor, QPixmap, QTextImageFormat, QTextDocument
 from PySide6.QtCore import Qt, QUrl
 
 # ==============================================================================
-# 1. 100점 프롬프트 아키텍처 핵심 상수 (System Instruction & Concrete Few-Shot)
+# 1. 100점 프롬프트 아키텍처 핵심 상수 (System Instruction & Domain Few-Shots)
 # ==============================================================================
 
-SYSTEM_BASE_INSTRUCTION = """You are a Principal Software Quality Assurance (SQA) Engineer specializing in Automotive Electronic Control Units (ECU), CAN/LIN/Ethernet networks, and Vehicle Domain Controllers (BCM, BCU, BDC).
-Your primary directive is to analyze automotive software requirements or trace logs and output strictly structured JSON specifications.
+SYSTEM_BASE_INSTRUCTION = """You are a Principal Software Quality Assurance (SQA) Engineer.
+Your primary directive is to analyze software requirements or execution logs and output strictly structured JSON specifications.
 
 [LANGUAGE & TERMINOLOGY POLICY]
 1. ALL natural language descriptions inside JSON (e.g., tc_name, summary, steps, expected_results, pass_factors, fail_factors) MUST be written in KOREAN (한국어).
-2. Automotive technical identifiers, CAN/LIN signal names (e.g., Sig_DrvDoorLockSt), ECU power states (e.g., IGN_ON, 0x02), protocol names (UDS, ISO-TP), and equipment names (Vector CANoe) MUST retain their standard English/Hex notations.
+2. Domain technical identifiers, API endpoints, CAN/LIN signal names (e.g., Sig_DrvDoorLockSt), ECU power states (e.g., IGN_ON, 0x02), protocol names (UDS, HTTP, REST), and equipment names MUST retain their standard English/Hex notations.
 
 [CRITICAL OUTPUT GRAMMAR]
 1. Output MUST be ONLY a single valid JSON object enclosed strictly within a ```json ... ``` markdown code block.
@@ -34,12 +34,12 @@ Your primary directive is to analyze automotive software requirements or trace l
 
 [QUANTITATIVE PRECISION MANDATE]
 1. Every Test Step and Expected Result MUST contain precise quantitative attributes:
-   - Physical units (ms, s, V, A, Hz, deg)
+   - Physical units / API Status Codes (ms, s, V, A, Hz, deg, HTTP 200, 404)
    - Logical/Comparison operators (==, !=, >=, <=, >, <)
-   - Hexadecimal/Decimal state values (e.g., 0x01, 13.5V)
+   - Hexadecimal/Decimal/JSON state values (e.g., 0x01, 13.5V, true, false)
 2. Strictly PROHIBITED ambiguous words: "약", "대략", "적절히", "확인할 것", "상응하는", "properly", "roughly", "about"."""
 
-FEW_SHOT_TC_CREATION = """[FEW-SHOT EXAMPLE - TC GENERATION]
+FEW_SHOT_TC_CREATION = """[FEW-SHOT EXAMPLE - TC GENERATION (AUTOMOTIVE)]
 Input Feature: Driver Door Unlocking
 Input Requirement: BCM must process 'SW_DrvDoorUnlock' hardwire input and transition 'Sig_DrvDoorLockSt' to UNLOCKED (0x01) within 150ms when Power State is IGN_ON (0x02).
 Input Acceptance: Signal transition within 150ms and no DTC generated.
@@ -73,6 +73,40 @@ Expected Output:
 }
 ```"""
 
+FEW_SHOT_TC_CREATION_WEB_API = """[FEW-SHOT EXAMPLE - TC GENERATION (WEB/API)]
+Input Feature: User Authentication API
+Input Requirement: POST /api/v1/auth/login must validate credentials and return HTTP 200 with JWT token within 200ms for valid credentials.
+Input Acceptance: Return HTTP 200 with valid JWT payload within 200ms.
+
+Expected Output:
+```json
+{
+  "test_cases": [
+    {
+      "tc_id": "TC_API_001",
+      "category": "Positive",
+      "title": "사용자 로그인 API 정상 응답 및 토큰 발급 검증",
+      "preconditions": [
+        "1. 인증 서비스 정상 가동 중 (HTTP Status 200)",
+        "2. 테스트용 유효 계정(user@test.com) 사전 준비 완료"
+      ],
+      "steps": [
+        "1. POST /api/v1/auth/login 요청 바디에 올바른 ID/PW를 실어 전송한다.",
+        "2. 응답 HTTP Status Code 및 Header의 Content-Type을 확인한다.",
+        "3. Response Body 내 accessToken 존재 여부 및 응답 시간을 확인한다."
+      ],
+      "expected_results": [
+        "1. HTTP Status Code == 200 OK 수신",
+        "2. Response Header Content-Type == application/json",
+        "3. 200ms 이내 유효한 JWT accessToken이 포함된 JSON 응답 수신"
+      ],
+      "risk": "HIGH",
+      "risk_description": "인증 실패 시 시스템 전체 접근 불능"
+    }
+  ]
+}
+```"""
+
 FEW_SHOT_VALIDATION_ANALYSIS = """[FEW-SHOT EXAMPLE - VALIDATION ANALYSIS]
 Input TC Name: TC_BCM_DOOR_001
 Input Purpose: Verify IGN_ON state transition and door unlock signal delay < 150ms.
@@ -84,7 +118,7 @@ Expected Output:
   "result": "PASS",
   "confidence": "HIGH",
   "confidence_reason": [
-    "BLF 로그 분석 결과, 스위치 입력(10.050s) 후 80ms 시점(10.130s)에 Sig_DrvDoorLockSt 신호가 0x01로 전이됨을 확인 함 (기대 기준: 150ms 이내)"
+    "BLF 로그 분석 결과, 스위치 입력(10.050s) 후 80ms 시점(10.130s)에 Sig_DrvDoorLockSt 신호가 0x01로 전이됨을 확인함 (기대 기준: 150ms 이내)"
   ],
   "risk": "LOW",
   "summary": "운전석 도어 잠금해제 신호전이 응답시간이 80ms로 측정되어 요구사항(150ms 이내)을 충족함.",
@@ -107,7 +141,7 @@ Expected Output:
   ],
   "gaps": [],
   "recommended_verification": [
-    "1. 전압 변동 조건(9.0V ~ 16.0V)에서의 응답시간 한계 검증추가",
+    "1. 전압 변동 조건(9.0V ~ 16.0V)에서의 응답시간 한계 검증 추가",
     "2. CAN 버스 로드율 80% 상태에서의 지연시간 비교 측정"
   ]
 }
@@ -227,15 +261,15 @@ class TcEngineMixin:
             sequence_instruction = """
 [Sequence Generation Mode: AI AUTO]
 - 요구사항, 시험 전 상태, 가능한 조작과 제한 조건을 분석하여 전체 시험 수행 순서를 생성한다.
-- 초기 상태 설정 -> 물리적 조작 -> 기능 Trigger -> Signal 상태 전이 확인 -> 최종 물리 동작 확인 순으로 구성한다.
-- 물리적 조작과 Signal 확인을 각각 독립된 별도 Step으로 작성한다.
+- 초기 상태 설정 -> 물리적 조작 -> 기능 Trigger -> Signal/상태 전이 확인 -> 최종 동작 확인 순으로 구성한다.
+- 물리적 조작과 Signal/응답 확인을 각각 독립된 별도 Step으로 작성한다.
 - 수치 조건이 명시되지 않은 시간, 전압, 횟수는 TBD 표기를 유지한다.
 """
         elif mode == "사용자 흐름 우선":
             sequence_instruction = """
 [Sequence Generation Mode: USER FLOW FIRST]
 - [Mandatory Test Execution Sequence]의 핵심 흐름과 순서를 완벽히 유지한다.
-- 축약된 흐름을 실제 수행 가능한 상세 Step으로 확장하되, 물리적 조작과 Signal 확인을 분리한다.
+- 축약된 흐름을 실제 수행 가능한 상세 Step으로 확장하되, 조작과 관찰 항목을 분리한다.
 - 사용자가 지정한 핵심 조작은 절대로 삭제하거나 순서를 바꾸지 않는다.
 """
         else:
@@ -756,9 +790,9 @@ class TcEngineMixin:
                 summary = summary.replace(signal, alias_name)
         return summary
 
-    def get_domain_prompt_values(self) -> Tuple[str, str, str]:
+    def get_domain_prompt_values(self, mode_override: Optional[str] = None) -> Tuple[str, str, str]:
         profile = self.current_domain_profile()
-        mode = self.mode.currentText()
+        mode = mode_override if mode_override else (self.mode.currentText() if hasattr(self, "mode") else "")
         if "Validation Analysis" in mode:
             rule_key = "analysis_rules"
         elif "TC Review" in mode:
@@ -779,19 +813,28 @@ class TcEngineMixin:
     # 3. 100점 프롬프트 템플릿 기반 핵심 파서 및 생성 메서드 (Refactored)
     # ==========================================================================
 
-    def generate_tc_creation_prompt(
-        self,
-        feature_name: str,
-        requirement: str,
-        expected_behavior: str,
-        level: str
-    ):
+    def generate_tc_creation_prompt(self, feature_name: str, requirement: str, expected_behavior: str, level: str) -> str:
         """
         100점 프롬프트 엔지니어링 가이드라인이 반영된 TC Creation Prompt 생성기.
         System Base Instruction + In-Context Few-Shot + 정량적 제약 조건 결합.
         """
+        # 1. 현재 선택된 도메인 프로필 확인
+        profile = self.current_domain_profile()
+        domain_name = profile.get("name", "")
+
+        # 2. 도메인별 Few-Shot 동적 분기
+        if "Web" in domain_name or "API" in domain_name:
+            few_shot_example = FEW_SHOT_TC_CREATION_WEB_API
+        else:
+            few_shot_example = FEW_SHOT_TC_CREATION  # 기존 자동차 전장용 Few-Shot
+
+        # 3. 사용자 입력값에만 선택적 Light Mask 적용 (시스템 템플릿 마스킹 방지)
+        masked_req = self.apply_tc_generation_light_mask(requirement) if hasattr(self, "apply_tc_generation_light_mask") else requirement
+        masked_exp = self.apply_tc_generation_light_mask(expected_behavior) if hasattr(self, "apply_tc_generation_light_mask") else expected_behavior
+
+        # 4. 기존 시퀀스 제어 모드 및 스코프 가이드라인 설정
         seq_mode = getattr(self, "tc_generation_sequence_mode", "사용자 흐름 우선")
-        
+
         if level == "Basic":
             level_scope = """[Generation Scope - Basic Level]
 - 정상 시나리오(Positive), 기본 실패 시나리오(Basic Negative), 핵심 상태 전이(State Transition) 위주로 생성한다.
@@ -805,41 +848,32 @@ class TcEngineMixin:
 - 동등 분할(Equivalence Partitioning), 경계값 분석(BVA), 결정 테이블(Decision Table), Fault Injection, Communication Loss, Power Cycle 조건을 포함한다.
 - 차량 통신 지연시간 및 세션 타임아웃 오차범위를 정량적으로 포함한다."""
 
-        prompt_block = f"""{SYSTEM_BASE_INSTRUCTION}
+        # 5. 도메인 Role, Rules, Evidence 바인딩
+        role_text, rule_text, evidence_text = self.get_domain_prompt_values("TC Generation")
 
-{FEW_SHOT_TC_CREATION}
+        # 6. 최종 프롬프트 블록 결합 및 반환
+        prompt = f"""{SYSTEM_BASE_INSTRUCTION}
 
-너는 __DOMAIN_ROLE__이다.
-다음 분야별 검증 기준을 적용하라.
-__DOMAIN_RULES__
+{few_shot_example}
 
-[Target Generation Metadata]
-Feature / Function: __FEATURE_NAME__
-Requirement / System Behavior: __REQUIREMENT__
-Target Behavior / Acceptance Criteria: __EXPECTED_BEHAVIOR__
-Prompt Level: __LEVEL__
-Sequence Strategy: {seq_mode}
+[Domain Role]
+{role_text}
+
+[Domain Rules]
+{rule_text}
 
 {level_scope}
 
-[Generation & Self-Review Process]
-1. 요구사항을 정량적으로 측정 가능한 단위(ms, V, Hz, 0xHEX, ==, >=, <=)로 분해한다.
-2. 입력된 [Mandatory Test Execution Sequence]가 존재할 경우 번호 순서를 생략하거나 재배치하지 않는다.
-3. 물리적 조작(Switch, Power)과 통신 신호 확인(CAN Signal)을 반드시 별개의 독립 Step으로 분리한다.
-4. steps와 expected_results의 배열 요소 개수는 1:1로 정확히 일치해야 한다.
-5. 확인되지 않은 사양은 임의로 수치를 확정하지 않고 TBD 또는 UNKNOWN으로 표기한다.
+[Sequence Mode Rules: {seq_mode}]
+- 사용자 지정 순서 보존 및 1:1 Step 대응을 엄격히 준수한다.
 
-[Output Format Instructions]
-반드시 유효한 단일 JSON Object만 출력하라. JSON 앞뒤에 일반 설명문을 작성하지 마라.
-결과 전체를 하나의 ```json 코드 블록 안에 출력하라.
+[Target Feature Input]
+Feature Name: {feature_name}
+Requirement: {masked_req}
+Expected Behavior: {masked_exp}
+Prompt Level: {level}
 """
-        self.generated_prompt = (
-            prompt_block
-            .replace("__FEATURE_NAME__", feature_name)
-            .replace("__REQUIREMENT__", requirement)
-            .replace("__EXPECTED_BEHAVIOR__", expected_behavior)
-            .replace("__LEVEL__", level)
-        )
+        return prompt
 
     def build_generated_tc_review_prompt(self, generated_data: Dict[str, Any]) -> str:
         """
@@ -863,7 +897,7 @@ Sequence Strategy: {seq_mode}
 
 [Review & Verification Instructions]
 1. 생성된 모든 TC에 대해 요구사항 추적성, 정량적 측정 가능성, 스텝 1:1 대칭성을 검증한다.
-2. 모호한 정성적 문구("적절히", "확인할 것")가 존재할 경우 정량적 수치(ms, V, 0xHEX)로 수정안을 작성한다.
+2. 모호한 정성적 문구("적절히", "확인할 것")가 존재할 경우 정량적 수치(ms, V, 0xHEX, HTTP Status)로 수정안을 작성한다.
 3. steps와 expected_results 항목 수가 일치하지 않는 경우 배열 개수를 수정한다.
 
 [Output Format Instructions]
@@ -1191,7 +1225,7 @@ Expected Result: __EXPECTED__
         elif "TC Generation" in mode:
             if not expected:
                 expected = "요구사항에 부합하는 정량적 Expected Result 및 PASS 기준을 도출한다."
-            self.generate_tc_creation_prompt(tc, purpose, expected, level)
+            self.generated_prompt = self.generate_tc_creation_prompt(tc, purpose, expected, level)
 
         else:
             QMessageBox.warning(self, "Mode Error", "지원하지 않는 Mode입니다.")
@@ -1210,10 +1244,6 @@ Expected Result: __EXPECTED__
             self.generated_prompt += "\n\n" + self.build_tc_review_json_instruction()
 
         self.generated_prompt = self.optimize_prompt_text(self.generated_prompt)
-        if "TC Generation" in mode:
-            self.generated_prompt = self.apply_tc_generation_light_mask(self.generated_prompt)
-        else:
-            self.reset_tc_generation_light_aliases()
         self.update_prompt_preview()
         self.save_history()
 
@@ -1239,7 +1269,7 @@ JSON 전체를 하나의 ```json 코드 블록 안에 넣어라.
       "requirement_coverage": "PARTIAL",
       "clarity": "POOR",
       "testability": "PARTIAL",
-      "missing_conditions": ["신호 지연시간 수치 미비"],
+      "missing_conditions": ["신호/응답 지연시간 수치 미비"],
       "issues": ["정성적 표현 사용됨"],
       "recommendations": ["150ms 이내 전이 조건 추가"],
       "revised_title": "",
@@ -1291,6 +1321,6 @@ JSON 전체를 하나의 ```json 코드 블록 안에 넣어라.
 
 [Gemini API Output Rules]
 1. Markdown 설명문 없이 오직 유효한 단일 JSON Object만 반환하라.
-2. 모든 설명 문구는 한국어로 작성하되, 기술 식별자(Signal, ECU)는 영문/Hex 표기를 유지하라.
+2. 모든 설명 문구는 한국어로 작성하되, 기술 식별자(Signal, ECU, API Endpoint)는 영문/Hex 표기를 유지하라.
 3. Enum 값에는 선택지 전체 문자열이 아닌 단일 선택 판정값(예: "PASS") 하나만 작성하라.
 """)
