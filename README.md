@@ -30,35 +30,3 @@
 ```bash
 git clone [https://github.com/justinwa1006/Validation_Assistant_Refactored.git](https://github.com/justinwa1006/Validation_Assistant_Refactored.git)
 cd Validation_Assistant_Refactored
-
-3단계: 필요한 프로그램 재료(라이브러리) 설치
-압축을 푼 폴더의 빈 공간에서 Shift + 마우스 우클릭 후 여기서 명령 창 열기 또는 PowerShell / 터미널 열기를 누릅니다.
-
-아래 명령어를 그대로 복사해서 붙여넣고 엔터(Enter)를 누릅니다:
-
-Bash
-pip install PySide6 openpyxl
-🚀 프로그램 실행하기
-💡 윈도우(Windows) 사용자 (가장 쉬운 방법)
-폴더 안에 있는 run_validation_assistant.bat 파일을 마우스로 더블 클릭하면 바로 프로그램이 실행됩니다!
-
-💻 검은 창(터미널)에서 실행할 경우
-Bash
-python unified_launcher.py
-📖 초간단 사용법
-상단 QA Domain 선택: 내가 검증하려는 분야(Automotive ECU, Web / API QA 등)를 고릅니다.
-
-내용 입력: 기능 이름과 요구사항을 입력합니다.
-
-프롬프트 복사: 오른쪽에 자동으로 생성된 글을 [복사] 버튼으로 가져옵니다.
-
-AI에게 전달: ChatGPT나 Gemini 같은 AI 모델에 붙여넣으면 고품질의 결과를 얻을 수 있습니다.
-
-⚠️ 자주 묻는 질문 (오류 해결)
-Q. run_validation_assistant.bat을 눌렀는데 검은 창이 켜졌다가 바로 꺼져요!
-
-파이썬 설치가 안 되었거나 환경변수(PATH) 설정이 안 된 경우입니다. 파이썬을 재설치하면서 Add Python to PATH를 체크했는지 확인해 주세요.
-
-Q. No module named PySide6 에러가 떠요!
-
-3단계의 pip install PySide6 openpyxl 명령어를 다시 실행하여 필요한 라이브러리를 설치해 주세요.
