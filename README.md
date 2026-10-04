@@ -1,26 +1,32 @@
-# 🚗 Automotive Validation Assistant
+# 🚗 Validation Assistant (쉬운 사용 가이드)
 
-PySide6 기반의 차량용 SW(CANoe/CAN, Controller Log 등) 검증 및 AI Test Case 분석 지원 도구입니다.
+> **컴퓨터나 코딩을 잘 몰라도 OK!**  
+> AI를 활용해 테스트케이스(TC)를 만들고 실행 로그를 분석해 주는 **SW 검증 보조 프로그램**입니다.
 
-## 🌟기술적 특징 (Key Engineering Highlights)
+## ❓ 어떤 프로그램인가요?
 
-### 1. SQA 검증 스코어링 & UI 시각화
-- AI 분석 결과(TOTAL SCORE) 점수 구간대별(80점 이상 / 50점 이상 / 미만) Dynamic QSS Property 적용으로 검증 상태의 직관적 시각화 지원.
-- 비동기 처리 및 토스트(Toast) 메시지 시스템 도입으로 검증 진행 상황 Feedback 개선.
+* **테스트케이스(TC) 자동 작성**: 요구사항만 적으면 AI가 정량적이고 정확한 테스트케이스를 만들어 줍니다.
+* **실행 로그 분석**: 실제 작동 로그를 넣으면 기대 결과와 비교해 PASS/FAIL 원인을 분석해 줍니다.
+* **보안 안전 지원**: 회사 내부 기술명이나 신호명이 AI로 그대로 유출되지 않도록 가려주는(마스킹) 기능이 포함되어 있습니다.
 
-### 2. 모듈 독립성 및 경로 안정성 확보
-- `Path(__file__).resolve().parent` 기반의 상대/절대 경로 자동 해소 로직을 구축하여 CWD(현재 작업 디렉토리) 변경에 독립적인 런처 구현.
+## 📥 다운로드 및 설치 방법 (3분 완성)
 
-## 📁 프로젝트 구조 (Architecture)
+### 1단계: 컴퓨터에 Python(파이썬)이 설치되어 있는지 확인
+이 프로그램은 **Python 3.10 이상**이 필요합니다.
+* 컴퓨터에 파이썬이 없다면 [파이썬 공식 다운로드 페이지](https://www.python.org/downloads/)에서 설치해 주세요.
+* ⚠️ **주의**: 설치창 아래쪽에 **`Add Python to PATH`** 체크박스가 있다면 꼭 체크하고 설치해 주세요!
 
-- `unified_launcher.py`: 통합 런처 (실시간 테마 패치, 단축키 이벤트 핸들링, Entry Point)
-- `engine.py`: Validation Assistant 핵심 제어 및 AI 분석 통합 엔진
-- `ui_design_system.py`: QSS 테마 관리, Dynamic Property, Toast 시스템
-- `ui_main.py` & `ui_components.py`: PySide6 컴포넌트 및 도메인 UI 레이아웃
-- `tc_engine.py` & `ai_engine.py`: Test Case 생성/검증 및 AI 결과 파싱
+### 2단계: 프로그램 다운로드하기
 
-## 🛠 Tech Stack
-- **Language**: Python 3.10+
-- **GUI Framework**: PySide6 (Qt for Python)
-- **Data & Export**: OpenPyXL, JSON
-- **Domain**: Automotive SQA, Vector CANoe Log Validation
+**방법 A. 가장 쉬운 방법 (ZIP 파일 다운로드)**
+1. 상단 오른쪽 초록색 **`Code`** -> Download.zip 클릭
+2. 다운로드한 파일의 압축을 풉니다.
+3. 폴더명은 Validation_Assistant_Refactored 이름으로사용해야합니다.(사용하고 싶은 폴더명이 있으면 여기서 수정)
+<img width="674" height="238" alt="image" src="https://github.com/user-attachments/assets/e0739438-87d6-49cd-a87e-af27942cbba0" />
+
+
+**방법 B. Git을 사용하는 경우**
+명령 프롬프트(cmd) 창을 열고 아래 명령어를 입력합니다:
+```bash
+git clone [https://github.com/justinwa1006/Validation_Assistant_Refactored.git](https://github.com/justinwa1006/Validation_Assistant_Refactored.git)
+cd Validation_Assistant_Refactored
