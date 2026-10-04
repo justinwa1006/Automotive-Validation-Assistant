@@ -1,6 +1,11 @@
 """
 tc_engine.py - Automotive & General SW Validation Assistant Prompt & Execution Engine
 Refactored to 100-Point Prompt Architecture (Multi-Domain Dynamic Few-Shot & Light Mask Protected)
+
+[Revision] 도메인 레지스트리 기반 프롬프트 분기 + 버그 수정판
+ - System Instruction / Few-Shot(Generation, Analysis) / Level Scope 를 도메인별로 분기
+ - 프로필(current_domain_profile)에 key / few_shot / level_scope 를 넣으면 코드 수정 없이 덮어쓰기 가능
+ - Light Mask 별칭 충돌, optimize_prompt_text 의 JSON 스키마 손상, Hex/단위 비교 오류 등 수정
 """
 
 from __future__ import annotations
@@ -8,6 +13,7 @@ import json
 import re
 import textwrap
 import hashlib
+import math
 import os
 from collections import Counter
 from typing import Dict, Any, List, Tuple, Optional
@@ -24,7 +30,7 @@ Your primary directive is to analyze software requirements or execution logs and
 
 [LANGUAGE & TERMINOLOGY POLICY]
 1. ALL natural language descriptions inside JSON (e.g., tc_name, summary, steps, expected_results, pass_factors, fail_factors) MUST be written in KOREAN (한국어).
-2. Domain technical identifiers, API endpoints, CAN/LIN signal names (e.g., Sig_DrvDoorLockSt), ECU power states (e.g., IGN_ON, 0x02), protocol names (UDS, HTTP, REST), and equipment names MUST retain their standard English/Hex notations.
+2. Domain technical identifiers (signal names, API endpoints, state values, protocol names, equipment names) MUST retain their standard English/Hex notations.
 
 [CRITICAL OUTPUT GRAMMAR]
 1. Output MUST be ONLY a single valid JSON object enclosed strictly within a ```json ... ``` markdown code block.
@@ -147,6 +153,121 @@ Expected Output:
 }
 ```"""
 
+# ------------------------------------------------------------------------------
+# 도메인 레지스트리: 새 도메인은 아래 딕셔너리에 항목만 추가하면 된다.
+#   - DOMAIN_SYSTEM_ADDENDUM : 도메인 전용 용어/표기 규칙 (System Instruction 뒤에 결합)
+#   - FEW_SHOTS              : 모드별 Few-Shot ("generation" | "analysis")
+#   - DOMAIN_LEVEL_EXTRA     : Prompt Level 별 도메인 추가 지침
+# 프로필(dict)에 "key", "few_shot", "level_scope" 가 있으면 그 값이 우선한다.
+# ------------------------------------------------------------------------------
+
+DEFAULT_DOMAIN_KEY = "automotive"
+
+DOMAIN_SYSTEM_ADDENDUM = {
+    "automotive": """[DOMAIN TERMINOLOGY - AUTOMOTIVE]
+- CAN/LIN 시그널명(예: Sig_DrvDoorLockSt), ECU 전원 상태(예: IGN_ON, 0x02), UDS 서비스/NRC는 영문/Hex 원문 표기를 유지한다.
+- 전압(V), 전류(A), 시간(ms), 주파수(Hz)는 단위와 허용 오차를 함께 명시한다.""",
+    "web_api": """[DOMAIN TERMINOLOGY - WEB/API]
+- HTTP Method, Endpoint, Status Code, Header, JSON Path 필드명은 영문 원문 표기를 유지한다.
+- 응답시간(ms), 페이로드 크기(bytes), 재시도 횟수는 수치와 비교 연산자로 명시한다.""",
+}
+
+FEW_SHOT_VALIDATION_ANALYSIS_WEB_API = """[FEW-SHOT EXAMPLE - VALIDATION ANALYSIS (WEB/API)]
+Input TC Name: TC_API_AUTH_001
+Input Purpose: Verify POST /api/v1/auth/login returns HTTP 200 with JWT accessToken within 200ms for valid credentials.
+Input Evidence Log: 12:00:00.000 POST /api/v1/auth/login sent, 12:00:00.145 HTTP 200 received, Content-Type: application/json, body.accessToken present (length 187).
+
+Expected Output:
+```json
+{
+  "result": "PASS",
+  "confidence": "HIGH",
+  "confidence_reason": [
+    "요청 로그(12:00:00.000)와 응답 로그(12:00:00.145)를 비교한 결과 응답시간 145ms로 측정됨 (기대 기준: 200ms 이내)"
+  ],
+  "risk": "LOW",
+  "summary": "로그인 API가 HTTP 200과 accessToken을 145ms에 반환하여 요구사항(200ms 이내)을 충족함.",
+  "evidence_status": "SUFFICIENT",
+  "pass_factors": [
+    "HTTP Status Code == 200 수신",
+    "응답시간 145ms <= 200ms",
+    "Response Body에 accessToken 존재"
+  ],
+  "fail_factors": [],
+  "evidence_coverage": {
+    "required_items": 3,
+    "verified_items": 3,
+    "coverage_percent": 100,
+    "missing_items": []
+  },
+  "observations": [
+    "12:00:00.000: POST /api/v1/auth/login 요청 전송",
+    "12:00:00.145: HTTP 200 응답 수신, Content-Type == application/json",
+    "응답 Body: accessToken 길이 187"
+  ],
+  "gaps": [],
+  "recommended_verification": [
+    "1. 잘못된 비밀번호 입력 시 HTTP 401 반환 및 응답시간 <= 200ms 검증 추가",
+    "2. 동시 요청 100건(RPS 100) 조건에서 p95 응답시간 비교 측정"
+  ]
+}
+```"""
+
+FEW_SHOTS = {
+    "automotive": {
+        "generation": FEW_SHOT_TC_CREATION,
+        "analysis": FEW_SHOT_VALIDATION_ANALYSIS,
+    },
+    "web_api": {
+        "generation": FEW_SHOT_TC_CREATION_WEB_API,
+        "analysis": FEW_SHOT_VALIDATION_ANALYSIS_WEB_API,
+    },
+}
+
+LEVEL_SCOPE_COMMON = {
+    "Basic": (
+        "- 정상 시나리오(Positive), 기본 실패 시나리오(Basic Negative), 핵심 상태 전이(State Transition) 위주로 생성한다.\n"
+        "- 각 TC는 tc_id, category, title, preconditions, steps, expected_results, risk, risk_description을 포함한다."
+    ),
+    "Detailed": (
+        "- Positive, Negative, Boundary Value, State Transition, Timeout, Retry, Recovery 관점의 테스트 시나리오를 포함한다.\n"
+        "- 시간/수치/상태값 경계 조건(Boundary Conditions)을 정량적 수치로 구체화한다."
+    ),
+    "Expert": (
+        "- 동등 분할(Equivalence Partitioning), 경계값 분석(BVA), 결정 테이블(Decision Table), Fault Injection 조건을 포함한다."
+    ),
+}
+
+DOMAIN_LEVEL_EXTRA = {
+    "automotive": {
+        "Detailed": "- 전압/신호값 경계 조건을 정량적 수치로 포함한다.",
+        "Expert": "- Communication Loss, Power Cycle 조건을 포함하고, 차량 통신 지연시간 및 세션 타임아웃 오차범위를 정량적으로 포함한다.",
+    },
+    "web_api": {
+        "Detailed": "- 요청 필드 길이/범위, 페이로드 크기(bytes), 응답시간(ms) 경계 조건을 포함한다.",
+        "Expert": "- 인증 만료, 동시 요청, Rate Limit(HTTP 429), 5xx 장애 후 복구 조건을 포함하고, 응답시간(ms) 오차범위를 정량적으로 포함한다.",
+    },
+}
+
+SEQUENCE_MODE_RULES = {
+    "AI 자동 생성": "- 요구사항을 분석해 Step 순서를 직접 구성하고, steps와 expected_results를 1:1로 대응시킨다.",
+    "사용자 흐름 우선": "- 사용자가 지정한 핵심 흐름과 순서를 유지하며 상세 Step으로 확장하고, steps와 expected_results를 1:1로 대응시킨다.",
+    "사용자 순서 고정": "- 사용자 지정 순서와 항목 수를 변경하지 않고, steps와 expected_results를 1:1로 대응시킨다.",
+}
+
+_WEB_API_NAME_RE = re.compile(r"\b(?:web|api|rest|http)\b|웹", re.I)
+_SECTION_HEADER_RE = re.compile(r'^\[{1,2}[^\[\]"]+\]{1,2}$')
+_NUMBERED_PREFIX_RE = re.compile(r"^\d+[.)]\s")
+_NUMBERED_ITEM_RE = re.compile(
+    r"^(?P<step>Step\s*)?(?P<num>\d+(?:[-.]\d+)*)(?P<sep>\s*[.)：:](?!\d)\s*|\s+|$)(?P<rest>.*)$",
+    re.I,
+)
+_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_HEX_RE = re.compile(r"^[+-]?0[xX][0-9A-Fa-f]+$")
+_UNIT_NUMBER_RE = re.compile(
+    r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?:ms|us|µs|s|mv|v|ma|a|khz|hz|deg|%)$", re.I
+)
+
 MAX_PROMPT_CHARS = 12000
 
 
@@ -247,6 +368,14 @@ class TcEngineMixin:
         if self.tc_generation_checkpoints.strip():
             requirement += "\n\n[Signals and Observation Checkpoints]\n" + self.tc_generation_checkpoints.strip()
 
+        if not requirement.strip():
+            QMessageBox.warning(
+                self,
+                "입력 확인",
+                "기능 동작/요구사항, 시험 전 상태, 수행 순서 중 하나 이상을 입력하세요."
+            )
+            return "", self.tc_generation_acceptance.strip()
+
         mode = self.tc_generation_sequence_mode
         sequence_exists = bool(self.tc_generation_sequence.strip())
         if mode == "사용자 순서 고정" and not sequence_exists:
@@ -288,9 +417,18 @@ class TcEngineMixin:
             line = raw.strip()
             if not line:
                 continue
-            match = re.match(r"^(?:Step\s*)?(\d+(?:[-.]\d+)*)\s*[.)：:]?\s*(.*)$", line, re.I)
-            if match:
-                items.append((match.group(1), match.group(2).strip() or line))
+            match = _NUMBERED_ITEM_RE.match(line)
+            # "13.5V 인가", "150ms 이내" 같은 수치 시작 문장은 번호로 보지 않는다.
+            is_numbered = bool(
+                match
+                and (
+                    match.group("step")
+                    or match.group("sep").strip()
+                    or re.search(r"[-.]", match.group("num"))
+                )
+            )
+            if is_numbered:
+                items.append((match.group("num"), match.group("rest").strip() or line))
             else:
                 items.append((str(len(items) + 1), line))
         return items
@@ -389,7 +527,7 @@ class TcEngineMixin:
         by_name = {}
         for item in catalog:
             by_name.setdefault(item.get("signal", ""), item)
-        for function_name, signal_name in self.signal_function_mapping.items():
+        for function_name, signal_name in (getattr(self, "signal_function_mapping", None) or {}).items():
             if requested.lower() in {str(function_name).lower(), str(signal_name).lower()} and signal_name in by_name:
                 return {"requested": requested, "resolved": signal_name, "score": 1.0, "status": "DIRECT_MAPPING"}
         wanted_norm = self._normalize_signal_match_name(requested)
@@ -435,19 +573,24 @@ class TcEngineMixin:
 
     def _coerce_rule_value(self, value: Any) -> Any:
         text = str(value).strip()
-        try:
+        if _HEX_RE.match(text):
+            return float(int(text, 16))
+        if _DECIMAL_RE.match(text):
             return float(text)
-        except Exception:
-            return text.upper()
+        unit_match = _UNIT_NUMBER_RE.match(text)
+        if unit_match:
+            return float(unit_match.group(1))
+        return text.upper()
 
     def _compare_rule_value(self, observed: Any, operator: str, expected: Any) -> Optional[bool]:
         left = self._coerce_rule_value(observed)
         right = self._coerce_rule_value(expected)
+        both_numeric = isinstance(left, float) and isinstance(right, float)
         if operator in {'=', '=='}:
-            return left == right
+            return math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-9) if both_numeric else left == right
         if operator == '!=':
-            return left != right
-        if not isinstance(left, float) or not isinstance(right, float):
+            return (not math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-9)) if both_numeric else left != right
+        if not both_numeric:
             return None
         return {'>': left > right, '<': left < right, '>=': left >= right, '<=': left <= right}.get(operator)
 
@@ -489,6 +632,9 @@ class TcEngineMixin:
                     item.update(result='PASS', confidence='HIGH', reason='기대 조건과 일치하는 값이 BLF에서 직접 확인되었습니다.', first_match_time_sec=matched[0].get('time_sec'))
                 else:
                     item.update(result='FAIL', confidence='HIGH', reason='Signal은 수신됐지만 기대 조건과 일치하는 값이 확인되지 않았습니다.', cause_candidates=['선행 Vehicle/ECU 상태 미충족', '요청 이후 응답 또는 상태 전이 지연', 'Validity/Timeout/통신 영향', 'DBC와 SW 버전 불일치 가능성'])
+            if resolution.get('status') == 'REVIEW_REQUIRED' and item.get('result') in ('PASS', 'FAIL'):
+                item['confidence'] = 'LOW'
+                item['reason'] = f"{item.get('reason', '')} (Signal 매핑 '{resolved_signal}'이 확정되지 않아 신뢰도를 낮춤)".strip()
             results.append(item)
         counts = Counter(r['result'] for r in results)
         report = {
@@ -717,11 +863,16 @@ class TcEngineMixin:
         letters = "ABCDEFGHJKLMNPQRSTUVWXYZ"
         return f"_{letters[int(digest[:2],16)%len(letters)]}{int(digest[2:4],16)%10}"
 
-    def apply_tc_generation_light_mask(self, text: str) -> str:
+    def apply_tc_generation_light_mask(self, text: str, reset: bool = True) -> str:
+        """
+        reset=True  : 별칭 map 을 새로 시작 (단독 호출)
+        reset=False : 기존 map 을 이어서 사용 (한 프롬프트 안에서 여러 입력을 연속 마스킹할 때)
+        """
         if not text or not hasattr(self, "tc_generation_signal_mode"):
             return str(text or "")
         mode = self.tc_generation_signal_mode.currentIndex()
-        self.reset_tc_generation_light_aliases()
+        if reset or not hasattr(self, "tc_generation_light_alias_map"):
+            self.reset_tc_generation_light_aliases()
         if mode == 2:
             return str(text)
         pattern = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b")
@@ -729,11 +880,17 @@ class TcEngineMixin:
 
         def repl(match):
             token = match.group(0)
-            if token.upper() in protected or re.search(r"_[A-Z][0-9]$", token):
-                return token
-            alias = (f"SIG_{len(self.tc_generation_light_alias_map)+1:03d}" if mode == 1 else token + self._light_alias_suffix(token))
-            self.tc_generation_light_alias_map[token] = alias
-            self.tc_generation_light_reverse_map[alias] = token
+            if token.upper() in protected or token in self.tc_generation_light_reverse_map:
+                return token  # 보호 토큰 또는 이미 변환된 별칭
+            alias = self.tc_generation_light_alias_map.get(token)
+            if alias is None:  # 같은 토큰은 항상 같은 별칭, 새 토큰만 번호 증가
+                alias = (
+                    f"SIG_{len(self.tc_generation_light_alias_map) + 1:03d}"
+                    if mode == 1
+                    else token + self._light_alias_suffix(token)
+                )
+                self.tc_generation_light_alias_map[token] = alias
+                self.tc_generation_light_reverse_map[alias] = token
             return alias
 
         return pattern.sub(repl, str(text))
@@ -785,13 +942,66 @@ class TcEngineMixin:
         summary = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
         if self.is_semantic_preserve_mode():
             self._ensure_semantic_signal_aliases()
-        if self.is_semantic_preserve_mode() or self.anonymize_signals_for_ai.isChecked():
-            for signal, alias_name in self.preferred_signal_aliases.items():
-                summary = summary.replace(signal, alias_name)
+        anonymize_widget = getattr(self, "anonymize_signals_for_ai", None)
+        anonymize = bool(anonymize_widget.isChecked()) if anonymize_widget is not None else False
+        if self.is_semantic_preserve_mode() or anonymize:
+            aliases = getattr(self, "preferred_signal_aliases", None) or {}
+            # 긴 이름부터, 식별자 경계 기준으로 치환 (Sig_Door 가 Sig_DoorLock 을 깨뜨리지 않도록)
+            for signal, alias_name in sorted(aliases.items(), key=lambda row: len(row[0]), reverse=True):
+                summary = re.sub(
+                    r"(?<![A-Za-z0-9_])" + re.escape(signal) + r"(?![A-Za-z0-9_])", alias_name, summary
+                )
         return summary
 
-    def get_domain_prompt_values(self, mode_override: Optional[str] = None) -> Tuple[str, str, str]:
-        profile = self.current_domain_profile()
+    # --------------------------------------------------------------------------
+    # 도메인 레지스트리 조회 헬퍼
+    # --------------------------------------------------------------------------
+    def get_domain_key(self) -> str:
+        profile = self.current_domain_profile() or {}
+        key = str(profile.get("key", "")).strip().lower()
+        if key in FEW_SHOTS:
+            return key
+        name = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(profile.get("name", "")))  # WebAPI -> Web API
+        if _WEB_API_NAME_RE.search(name):
+            return "web_api"
+        return DEFAULT_DOMAIN_KEY
+
+    def get_domain_few_shot(self, kind: str) -> str:
+        """kind: 'generation' | 'analysis'. 프로필 few_shot 이 있으면 우선, 없으면 레지스트리."""
+        profile = self.current_domain_profile() or {}
+        custom = profile.get("few_shot")
+        if isinstance(custom, dict) and custom.get(kind):
+            return str(custom[kind])
+        shots = FEW_SHOTS.get(self.get_domain_key(), FEW_SHOTS[DEFAULT_DOMAIN_KEY])
+        return shots.get(kind, "")
+
+    def build_system_instruction(self) -> str:
+        addendum = DOMAIN_SYSTEM_ADDENDUM.get(self.get_domain_key(), "")
+        return SYSTEM_BASE_INSTRUCTION + (f"\n\n{addendum}" if addendum else "")
+
+    def build_level_scope(self, level: str) -> str:
+        profile = self.current_domain_profile() or {}
+        level_key = level if level in ("Basic", "Detailed") else "Expert"
+        custom = profile.get("level_scope")
+        if isinstance(custom, dict) and custom.get(level_key):
+            body = str(custom[level_key])
+        else:
+            extra = DOMAIN_LEVEL_EXTRA.get(self.get_domain_key(), {}).get(level_key, "")
+            body = LEVEL_SCOPE_COMMON[level_key] + (f"\n{extra}" if extra else "")
+        return f"[Generation Scope - {level_key} Level]\n{body}"
+
+    @staticmethod
+    def _fill_template(template: str, values: Dict[str, Any]) -> str:
+        """플레이스홀더를 한 번에(single-pass) 치환한다. 사용자 입력 안의 __XXX__ 는 재치환되지 않는다."""
+        if not values:
+            return template
+        pattern = re.compile("|".join(re.escape(k) for k in sorted(values, key=len, reverse=True)))
+        return pattern.sub(lambda m: str(values[m.group(0)]), template)
+
+    def get_domain_prompt_values(
+        self, mode_override: Optional[str] = None, with_evidence: bool = True
+    ) -> Tuple[str, str, str]:
+        profile = self.current_domain_profile() or {}
         mode = mode_override if mode_override else (self.mode.currentText() if hasattr(self, "mode") else "")
         if "Validation Analysis" in mode:
             rule_key = "analysis_rules"
@@ -802,11 +1012,13 @@ class TcEngineMixin:
         role = profile.get("role", "Software Quality Assurance Specialist")
         rules = profile.get(rule_key, [])
         rule_text = "\n".join(f"- {rule}" for rule in rules)
-        evidence = (
-            self.get_blf_summary_for_prompt()
-            if profile.get("automotive_tools")
-            else self.get_domain_evidence_summary()
-        )
+        evidence = ""
+        if with_evidence:  # evidence 가 쓰이지 않는 모드에서는 BLF 요약 계산을 생략
+            evidence = (
+                self.get_blf_summary_for_prompt()
+                if profile.get("automotive_tools")
+                else self.get_domain_evidence_summary()
+            )
         return role, rule_text, evidence
 
     # ==========================================================================
@@ -816,43 +1028,23 @@ class TcEngineMixin:
     def generate_tc_creation_prompt(self, feature_name: str, requirement: str, expected_behavior: str, level: str) -> str:
         """
         100점 프롬프트 엔지니어링 가이드라인이 반영된 TC Creation Prompt 생성기.
-        System Base Instruction + In-Context Few-Shot + 정량적 제약 조건 결합.
+        System Instruction(+도메인 용어) + 도메인 Few-Shot + 정량적 제약 조건 결합.
         """
-        # 1. 현재 선택된 도메인 프로필 확인
-        profile = self.current_domain_profile()
-        domain_name = profile.get("name", "")
+        system_instruction = self.build_system_instruction()
+        few_shot_example = self.get_domain_few_shot("generation")
 
-        # 2. 도메인별 Few-Shot 동적 분기
-        if "Web" in domain_name or "API" in domain_name:
-            few_shot_example = FEW_SHOT_TC_CREATION_WEB_API
-        else:
-            few_shot_example = FEW_SHOT_TC_CREATION  # 기존 자동차 전장용 Few-Shot
+        # 사용자 입력에만 Light Mask 적용 (시스템 템플릿 마스킹 방지).
+        # 별칭 map 은 이 프롬프트 생성 동안 공유해야 요구사항/기대동작 간 별칭이 충돌하지 않는다.
+        self.reset_tc_generation_light_aliases()
+        masked_req = self.apply_tc_generation_light_mask(requirement, reset=False)
+        masked_exp = self.apply_tc_generation_light_mask(expected_behavior, reset=False)
 
-        # 3. 사용자 입력값에만 선택적 Light Mask 적용 (시스템 템플릿 마스킹 방지)
-        masked_req = self.apply_tc_generation_light_mask(requirement) if hasattr(self, "apply_tc_generation_light_mask") else requirement
-        masked_exp = self.apply_tc_generation_light_mask(expected_behavior) if hasattr(self, "apply_tc_generation_light_mask") else expected_behavior
-
-        # 4. 기존 시퀀스 제어 모드 및 스코프 가이드라인 설정
         seq_mode = getattr(self, "tc_generation_sequence_mode", "사용자 흐름 우선")
+        sequence_rule = SEQUENCE_MODE_RULES.get(seq_mode, SEQUENCE_MODE_RULES["사용자 흐름 우선"])
+        level_scope = self.build_level_scope(level)
+        role_text, rule_text, _ = self.get_domain_prompt_values("TC Generation", with_evidence=False)
 
-        if level == "Basic":
-            level_scope = """[Generation Scope - Basic Level]
-- 정상 시나리오(Positive), 기본 실패 시나리오(Basic Negative), 핵심 상태 전이(State Transition) 위주로 생성한다.
-- 각 TC는 tc_id, category, title, preconditions, steps, expected_results, risk, risk_description을 포함한다."""
-        elif level == "Detailed":
-            level_scope = """[Generation Scope - Detailed Level]
-- Positive, Negative, Boundary Value, State Transition, Timeout, Retry, Recovery 관점의 테스트 시나리오를 포함한다.
-- 전압/시간/신호값 경계 조건(Boundary Conditions)을 정량적 수치로 구체화한다."""
-        else:
-            level_scope = """[Generation Scope - Expert Level]
-- 동등 분할(Equivalence Partitioning), 경계값 분석(BVA), 결정 테이블(Decision Table), Fault Injection, Communication Loss, Power Cycle 조건을 포함한다.
-- 차량 통신 지연시간 및 세션 타임아웃 오차범위를 정량적으로 포함한다."""
-
-        # 5. 도메인 Role, Rules, Evidence 바인딩
-        role_text, rule_text, evidence_text = self.get_domain_prompt_values("TC Generation")
-
-        # 6. 최종 프롬프트 블록 결합 및 반환
-        prompt = f"""{SYSTEM_BASE_INSTRUCTION}
+        prompt = f"""{system_instruction}
 
 {few_shot_example}
 
@@ -865,7 +1057,7 @@ class TcEngineMixin:
 {level_scope}
 
 [Sequence Mode Rules: {seq_mode}]
-- 사용자 지정 순서 보존 및 1:1 Step 대응을 엄격히 준수한다.
+{sequence_rule}
 
 [Target Feature Input]
 Feature Name: {feature_name}
@@ -879,12 +1071,12 @@ Prompt Level: {level}
         """
         생성된 TC JSON 결과를 독립적 Reviewer 관점에서 2차 재검토하는 Prompt 생성기.
         """
-        profile = self.current_domain_profile()
+        profile = self.current_domain_profile() or {}
         role = profile.get("role", "Software Quality Assurance Specialist")
         review_rules = "\n".join(f"- {rule}" for rule in profile.get("review_rules", []))
         generated_json = json.dumps(generated_data, ensure_ascii=False, indent=2)
 
-        return self.clean_prompt_block(f"""{SYSTEM_BASE_INSTRUCTION}
+        return self.clean_prompt_block(f"""{self.build_system_instruction()}
 
 너는 {role}이다.
 방금 생성된 Test Case 전체를 독립적인 Lead SQA Reviewer 관점에서 다시 검토하라.
@@ -960,6 +1152,13 @@ Prompt Level: {level}
             previous_blank = is_blank
         return "\n".join(cleaned_lines).strip()
 
+    @staticmethod
+    def _is_structural_line(stripped: str) -> bool:
+        """JSON 스키마 등 들여쓰기/중복이 의미를 갖는 구조 라인 판별."""
+        if stripped[0] in '{}]"':
+            return True
+        return stripped[0] == "[" and not _SECTION_HEADER_RE.match(stripped)
+
     def optimize_prompt_text(self, text: str) -> str:
         if not text:
             return ""
@@ -969,7 +1168,6 @@ Prompt Level: {level}
         previous_blank = False
         seen_lines = set()
         seen_sections = set()
-        repeatable_prefixes = ("- ", "1. ", "2. ", "3. ", "4. ", "5. ")
         for raw in text.splitlines():
             line = raw.rstrip()
             stripped = line.strip()
@@ -987,13 +1185,19 @@ Prompt Level: {level}
                     output.append("")
                 previous_blank = True
                 continue
-            if stripped.startswith("[") and stripped.endswith("]"):
+            if self._is_structural_line(stripped):
+                # 코드블록 밖 JSON 스키마: '}' ']' 중복 제거/들여쓰기 제거로 깨지지 않게 그대로 보존
+                output.append(line)
+                previous_blank = False
+                continue
+            if _SECTION_HEADER_RE.match(stripped):
                 section_key = stripped.lower()
                 if section_key in seen_sections:
                     continue
                 seen_sections.add(section_key)
             normalized = re.sub(r"\s+", " ", stripped).lower()
-            if normalized in seen_lines and not stripped.startswith(repeatable_prefixes):
+            is_list_item = stripped.startswith("- ") or bool(_NUMBERED_PREFIX_RE.match(stripped))
+            if normalized in seen_lines and not is_list_item:
                 continue
             seen_lines.add(normalized)
             output.append(line.lstrip())
@@ -1049,7 +1253,8 @@ Prompt Level: {level}
                     Qt.SmoothTransformation
                 )
 
-                resource_name = f"prompt_evidence_{index}_{os.path.abspath(file_path)}"
+                path_digest = hashlib.sha256(os.path.abspath(file_path).encode("utf-8")).hexdigest()[:12]
+                resource_name = f"prompt_evidence_{index}_{path_digest}"
                 resource_url = QUrl(resource_name)
 
                 document.addResource(
@@ -1094,13 +1299,14 @@ Prompt Level: {level}
         """
         Validation Analysis, TC Review, TC Generation 모드 통합 프롬프트 빌더.
         """
-        if "Validation Analysis" in self.mode.currentText() or "TC Review" in self.mode.currentText():
+        mode = self.mode.currentText()
+        if "Validation Analysis" in mode or "TC Review" in mode:
             self.sync_structured_validation_to_legacy_fields()
         tc = self.tc.text().strip()
         purpose = self.purpose.toPlainText().strip()
         expected = self.expected.toPlainText().strip()
 
-        if "Validation Analysis" in self.mode.currentText() and hasattr(self, "validation_preconditions"):
+        if "Validation Analysis" in mode and hasattr(self, "validation_preconditions"):
             pre = self.validation_preconditions.toPlainText().strip()
             steps = self.validation_steps.toPlainText().strip()
             expected_result = self.validation_expected_results.toPlainText().strip()
@@ -1121,14 +1327,16 @@ Prompt Level: {level}
             else ""
         )
 
-        mode = self.mode.currentText()
         level = self.prompt_level.currentText()
-        if "TC Generation" in mode:
-            purpose, expected = self.get_tc_generation_prompt_inputs()
 
         if not tc:
             QMessageBox.warning(self, "입력 확인", "TC Name 또는 Feature Name을 입력하세요.")
             return
+
+        if "TC Generation" in mode:
+            purpose, expected = self.get_tc_generation_prompt_inputs()
+            if not purpose:
+                return  # 입력 오류 안내는 get_tc_generation_prompt_inputs 에서 이미 표시됨
 
         if not purpose:
             QMessageBox.warning(self, "입력 확인", "Purpose 또는 Requirement를 입력하세요.")
@@ -1139,8 +1347,10 @@ Prompt Level: {level}
             tc = "LOCAL_TC_REFERENCE_OMITTED"
             purpose = "TC 원문은 보안 정책 확인 전이므로 제공하지 않음. Preconditions/Steps는 로컬에 보관됨."
             local_rules = self.extract_tc_blf_validation_rules()
-            selected_signals = list(getattr(self, "tc_related_parse_signals", []) or [])
-            expected = f"Actual Result 원문 제외. 로컬 Expected 조건 {len(local_rules)}개 비교 적용됨. Signal: {', '.join(selected_signals) if selected_signals else '미확정'}"
+            selected_signal_count = len(list(getattr(self, "tc_related_parse_signals", []) or []))
+            # 보안 기본 모드에서는 실제 Signal 명을 프롬프트에 넣지 않고 개수만 전달한다.
+            signal_note = f"선택 Signal {selected_signal_count}개(실명은 로컬에서만 관리)" if selected_signal_count else "Signal 미확정"
+            expected = f"Actual Result 원문 제외. 로컬 Expected 조건 {len(local_rules)}개 비교 적용됨. {signal_note}"
             analysis_question = "제공된 익명화 BLF 요약만 분석하고 PASS/FAIL 판정을 확정하지 않는다."
 
         elif "Validation Analysis" in mode and self.is_semantic_preserve_mode():
@@ -1157,9 +1367,10 @@ Prompt Level: {level}
         # 1. Validation Analysis Prompt 빌드
         # ======================================================================
         if "Validation Analysis" in mode:
-            validation_template = f"""{SYSTEM_BASE_INSTRUCTION}
+            domain_role, domain_rules, domain_evidence = self.get_domain_prompt_values(mode)
+            validation_template = f"""{self.build_system_instruction()}
 
-{FEW_SHOT_VALIDATION_ANALYSIS}
+{self.get_domain_few_shot("analysis")}
 
 너는 __DOMAIN_ROLE__이다.
 다음 분야별 분석 기준을 적용하라.
@@ -1183,21 +1394,23 @@ __DOMAIN_EVIDENCE__
 2. 증적이 부족한 경우 result는 "INCONCLUSIVE" 또는 "EVIDENCE INSUFFICIENT"로 처리한다.
 3. recommended_verification은 정량적 확인 방법과 판단 기준을 포함하여 작성한다.
 """
-            self.generated_prompt = (
-                validation_template
-                .replace("__TC_NAME__", tc)
-                .replace("__PURPOSE__", purpose)
-                .replace("__EXPECTED__", expected)
-                .replace("__ANALYSIS_PURPOSE__", self.analysis_purpose.currentText() if hasattr(self, "analysis_purpose") else "전체 분석")
-                .replace("__ANALYSIS_QUESTION__", analysis_question or "Actual Result와 Expected Result 간 차이 원인을 정량 분석하라.")
-                .replace("__BLF_SUMMARY__", self.get_blf_summary_for_prompt())
-            )
+            self.generated_prompt = self._fill_template(validation_template, {
+                "__DOMAIN_ROLE__": domain_role,
+                "__DOMAIN_RULES__": domain_rules,
+                "__DOMAIN_EVIDENCE__": domain_evidence,
+                "__TC_NAME__": tc,
+                "__PURPOSE__": purpose,
+                "__EXPECTED__": expected,
+                "__ANALYSIS_PURPOSE__": self.analysis_purpose.currentText() if hasattr(self, "analysis_purpose") else "전체 분석",
+                "__ANALYSIS_QUESTION__": analysis_question or "Actual Result와 Expected Result 간 차이 원인을 정량 분석하라.",
+            })
 
         # ======================================================================
         # 2. TC Review Prompt 빌드
         # ======================================================================
         elif "TC Review" in mode:
-            review_template = f"""{SYSTEM_BASE_INSTRUCTION}
+            domain_role, domain_rules, _ = self.get_domain_prompt_values(mode, with_evidence=False)
+            review_template = f"""{self.build_system_instruction()}
 
 너는 __DOMAIN_ROLE__이다.
 다음 분야별 리뷰 기준을 적용하라.
@@ -1212,12 +1425,13 @@ Expected Result: __EXPECTED__
 1. TC의 명확성, 정량적 측정 가능성, 누락된 경계 조건(Boundary Conditions)을 검토한다.
 2. 모호한 정성적 문구가 있을 경우 정량적 수치 조건(ms, V, 0xHEX)으로 보정안을 제시한다.
 """
-            self.generated_prompt = (
-                review_template
-                .replace("__TC_NAME__", tc)
-                .replace("__PURPOSE__", purpose)
-                .replace("__EXPECTED__", expected)
-            )
+            self.generated_prompt = self._fill_template(review_template, {
+                "__DOMAIN_ROLE__": domain_role,
+                "__DOMAIN_RULES__": domain_rules,
+                "__TC_NAME__": tc,
+                "__PURPOSE__": purpose,
+                "__EXPECTED__": expected,
+            })
 
         # ======================================================================
         # 3. TC Generation Prompt 빌드
@@ -1231,13 +1445,6 @@ Expected Result: __EXPECTED__
             QMessageBox.warning(self, "Mode Error", "지원하지 않는 Mode입니다.")
             return
 
-        domain_role, domain_rules, domain_evidence = self.get_domain_prompt_values()
-        self.generated_prompt = (
-            self.generated_prompt
-            .replace("__DOMAIN_ROLE__", domain_role)
-            .replace("__DOMAIN_RULES__", domain_rules)
-            .replace("__DOMAIN_EVIDENCE__", domain_evidence)
-        )
         self.generated_prompt = self.clean_prompt_block(self.generated_prompt)
 
         if "TC Review" in mode:
@@ -1317,7 +1524,7 @@ JSON 전체를 하나의 ```json 코드 블록 안에 넣어라.
 
     def build_gemini_json_instruction(self) -> str:
         """Gemini API 전용 표준 JSON 스키마 지시사항 생성"""
-        return self.clean_prompt_block(f"""{SYSTEM_BASE_INSTRUCTION}
+        return self.clean_prompt_block(f"""{self.build_system_instruction()}
 
 [Gemini API Output Rules]
 1. Markdown 설명문 없이 오직 유효한 단일 JSON Object만 반환하라.
