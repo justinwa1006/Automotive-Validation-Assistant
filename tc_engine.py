@@ -8,10 +8,11 @@ import json
 import re
 import textwrap
 import hashlib
+import os
 from collections import Counter
 from typing import Dict, Any, List, Tuple, Optional
 from PySide6.QtWidgets import QMessageBox, QApplication, QTextEdit
-from PySide6.QtGui import QTextCursor, QPixmap, QTextImageFormat
+from PySide6.QtGui import QTextCursor, QPixmap, QTextImageFormat, QTextDocument
 from PySide6.QtCore import Qt, QUrl
 
 # ==============================================================================
